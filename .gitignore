@@ -1,0 +1,4 @@
+/jumpserver
+/data/
+*.db
+.DS_Store

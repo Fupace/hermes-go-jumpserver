@@ -1,0 +1,77 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  GO_VERSION: "1.22"
+  REGISTRY: ghcr.io
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "${{ env.GO_VERSION }}"
+          cache: true
+      - run: go mod tidy
+      - run: go vet ./...
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "${{ env.GO_VERSION }}"
+          cache: true
+      - run: go mod tidy
+      - run: go test -v -race ./...
+
+  build-and-push:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ github.repository }}:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+      - run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+          cd k8s
+          sed -i "s|\${DOCKER_IMAGE}|${{ env.REGISTRY }}/${{ github.repository }}|g" deployment.yaml
+          sed -i "s|\${DOCKER_TAG}|${{ github.sha }}|g" deployment.yaml
+          sed -i "s|\${K8S_NAMESPACE}|${{ vars.K8S_NAMESPACE || 'default' }}|g" deployment.yaml service.yaml
+          kubectl apply -f deployment.yaml --insecure-skip-tls-verify --validate=false
+          kubectl apply -f service.yaml --insecure-skip-tls-verify --validate=false
+          kubectl rollout status deployment/hermes-go-jumpserver -n "${{ vars.K8S_NAMESPACE || 'default' }}" --timeout=120s --insecure-skip-tls-verify
+          kubectl get pods -l app=hermes-go-jumpserver -n "${{ vars.K8S_NAMESPACE || 'default' }}" --insecure-skip-tls-verify

@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hermes-go-jumpserver
+  namespace: ${K8S_NAMESPACE}
+  labels:
+    app: hermes-go-jumpserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hermes-go-jumpserver
+  template:
+    metadata:
+      labels:
+        app: hermes-go-jumpserver
+    spec:
+      containers:
+        - name: jumpserver
+          image: ${DOCKER_IMAGE}:${DOCKER_TAG}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /login
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /login
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: data
+          emptyDir: {}
