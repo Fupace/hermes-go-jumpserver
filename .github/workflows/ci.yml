@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   GO_VERSION: "1.22"
@@ -71,11 +72,14 @@ jobs:
       - run: |
           mkdir -p ~/.kube
           echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+          KNS="${{ vars.K8S_NAMESPACE || 'default' }}"
           cd k8s
           sed -i "s|\${DOCKER_IMAGE}|${{ env.IMAGE_NAME }}|g" deployment.yaml
           sed -i "s|\${DOCKER_TAG}|${{ github.sha }}|g" deployment.yaml
-          sed -i "s|\${K8S_NAMESPACE}|${{ vars.K8S_NAMESPACE || 'default' }}|g" deployment.yaml service.yaml
+          sed -i "s|\${K8S_NAMESPACE}|${KNS}|g" deployment.yaml service.yaml ingress.yaml ingress-http.yaml
           kubectl apply -f deployment.yaml --insecure-skip-tls-verify --validate=false
           kubectl apply -f service.yaml --insecure-skip-tls-verify --validate=false
-          kubectl rollout status deployment/hermes-go-jumpserver -n "${{ vars.K8S_NAMESPACE || 'default' }}" --timeout=120s --insecure-skip-tls-verify
-          kubectl get pods -l app=hermes-go-jumpserver -n "${{ vars.K8S_NAMESPACE || 'default' }}" --insecure-skip-tls-verify
+          kubectl rollout status deployment/hermes-go-jumpserver -n ${KNS} --timeout=120s --insecure-skip-tls-verify
+          kubectl get pods -l app=hermes-go-jumpserver -n ${KNS} --insecure-skip-tls-verify
+          kubectl apply -f ingress.yaml --insecure-skip-tls-verify --validate=false
+          kubectl apply -f ingress-http.yaml --insecure-skip-tls-verify --validate=false

@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hermes-go-jumpserver
+  namespace: ${K8S_NAMESPACE}
+  annotations:
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  tls:
+    - hosts:
+        - hermes-go-jumpserver.steedgrace.com
+      secretName: steedgrace-com-tls-secret
+  rules:
+    - host: hermes-go-jumpserver.steedgrace.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hermes-go-jumpserver
+                port:
+                  number: 8080
