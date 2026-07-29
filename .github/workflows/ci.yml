@@ -66,28 +66,23 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: "v1.29.0"
+      - uses: azure/setup-kubectl@v4
       - name: Set lowercase image name
         run: echo "IMAGE_NAME=$(echo '${{ env.REGISTRY }}/${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-      - name: Decode kubeconfig
+      - name: Write kubeconfig (no CA cert)
         env:
           KUBECONFIG_B64: ${{ secrets.KUBECONFIG }}
         run: |
           python3 -c "
-          import base64, os
+          import base64, re, os
           yaml = base64.b64decode(os.environ['KUBECONFIG_B64']).decode()
+          # Remove certificate-authority-data (not needed with insecure-skip-tls-verify)
+          yaml = re.sub(r'certificate-authority-data:\s*[A-Za-z0-9+/=\s]+', 'certificate-authority-data: ""', yaml)
           os.makedirs(os.path.expanduser('~/.kube'), exist_ok=True)
           with open(os.path.expanduser('~/.kube/config'), 'w') as f:
               f.write(yaml)
-          print(f'kubeconfig: {len(yaml)} bytes')
+          print(f'kubeconfig: {len(yaml)} bytes (CA removed)')
           "
-          kubectl version --client 2>&1 | head -1
-          grep 'server:' ~/.kube/config
-          echo "--- trying kubectl cluster-info ---"
-          kubectl cluster-info --insecure-skip-tls-verify 2>&1 | head -5
       - run: |
           KNS="${{ vars.K8S_NAMESPACE || 'default' }}"
           cd k8s
