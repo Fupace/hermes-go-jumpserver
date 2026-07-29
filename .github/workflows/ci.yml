@@ -66,7 +66,10 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-kubectl@v4
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.29.0"
       - name: Set lowercase image name
         run: echo "IMAGE_NAME=$(echo '${{ env.REGISTRY }}/${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Decode kubeconfig
@@ -81,6 +84,10 @@ jobs:
               f.write(yaml)
           print(f'kubeconfig: {len(yaml)} bytes')
           "
+          kubectl version --client 2>&1 | head -1
+          grep 'server:' ~/.kube/config
+          echo "--- trying kubectl cluster-info ---"
+          kubectl cluster-info --insecure-skip-tls-verify 2>&1 | head -5
       - run: |
           KNS="${{ vars.K8S_NAMESPACE || 'default' }}"
           cd k8s
