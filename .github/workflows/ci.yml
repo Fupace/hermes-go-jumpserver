@@ -66,36 +66,103 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-kubectl@v4
       - name: Set lowercase image name
         run: echo "IMAGE_NAME=$(echo '${{ env.REGISTRY }}/${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-      - name: Write kubeconfig (no CA cert)
+      - name: Deploy via K8s API
         env:
           KUBECONFIG_B64: ${{ secrets.KUBECONFIG }}
+          IMAGE: ${{ env.IMAGE_NAME }}
+          TAG: ${{ github.sha }}
+          K8S_NS: ${{ vars.K8S_NAMESPACE || 'default' }}
         run: |
           python3 -c "
-          import base64, os
+          import base64, json, ssl, http.client, re, time, os
+
           yaml = base64.b64decode(os.environ['KUBECONFIG_B64']).decode()
-          # Remove certificate-authority-data line (not needed with insecure-skip)
-          lines = yaml.split('\n')
-          filtered = [l for l in lines if 'certificate-authority-data' not in l]
-          yaml = '\n'.join(filtered)
-          os.makedirs(os.path.expanduser('~/.kube'), exist_ok=True)
-          with open(os.path.expanduser('~/.kube/config'), 'w') as f:
-              f.write(yaml)
-          print(f'kubeconfig: {len(yaml)} bytes (CA removed)')
-          print('First 4 lines:')
-          for l in yaml.split('\n')[:4]: print(f'  {l[:80]}')
+          
+          def ext(key):
+              m = re.search(key + r':\s*(.+?)(?:\n\s*\w|\n\w|\$)', yaml, re.DOTALL)
+              return re.sub(r'\s+', '', m.group(1)) if m else None
+
+          cert_b, key_b = base64.b64decode(ext('client-certificate-data')), base64.b64decode(ext('client-key-data'))
+          with open('/tmp/k8s-cert.pem','wb') as f: f.write(cert_b)
+          with open('/tmp/k8s-key.pem','wb') as f: f.write(key_b)
+
+          ctx = ssl._create_unverified_context()
+          ctx.load_cert_chain('/tmp/k8s-cert.pem', '/tmp/k8s-key.pem')
+          ctx.check_hostname = False
+
+          def k8s(method, path, body=None):
+              conn = http.client.HTTPSConnection('45.207.168.244', 16443, context=ctx)
+              h = {'User-Agent':'hermes-ci','Content-Type':'application/json'}
+              b = json.dumps(body).encode() if body else None
+              conn.request(method, path, body=b, headers=h)
+              r = conn.getresponse()
+              d = r.read().decode()
+              conn.close()
+              return json.loads(d) if d else None, r.status
+
+          ns = os.environ['K8S_NS']
+          img = os.environ['IMAGE'] + ':' + os.environ['TAG']
+          print(f'Deploying {img} to {ns}')
+
+          dep = {
+              'apiVersion':'apps/v1','kind':'Deployment',
+              'metadata':{'name':'hermes-go-jumpserver','namespace':ns},
+              'spec':{
+                  'replicas':1,'selector':{'matchLabels':{'app':'hermes-go-jumpserver'}},
+                  'template':{
+                      'metadata':{'labels':{'app':'hermes-go-jumpserver'}},
+                      'spec':{
+                          'containers':[{
+                              'name':'jumpserver','image':img,
+                              'ports':[{'containerPort':8080}],
+                              'volumeMounts':[{'name':'data','mountPath':'/data'}],
+                              'resources':{'requests':{'cpu':'100m','memory':'64Mi'},'limits':{'cpu':'500m','memory':'256Mi'}},
+                              'livenessProbe':{'httpGet':{'path':'/login','port':8080},'initialDelaySeconds':10,'periodSeconds':30},
+                              'readinessProbe':{'httpGet':{'path':'/login','port':8080},'initialDelaySeconds':5,'periodSeconds':10}
+                          }],
+                          'volumes':[{'name':'data','emptyDir':{}}]
+                      }
+                  }
+              }
+          }
+          _, s = k8s('GET', f'/apis/apps/v1/namespaces/{ns}/deployments/hermes-go-jumpserver')
+          if s == 404:
+              _, s = k8s('POST', f'/apis/apps/v1/namespaces/{ns}/deployments', dep)
+              print(f'  Deployment: created ({s})')
+          else:
+              _, s = k8s('PUT', f'/apis/apps/v1/namespaces/{ns}/deployments/hermes-go-jumpserver', dep)
+              print(f'  Deployment: updated ({s})')
+
+          svc = {'apiVersion':'v1','kind':'Service','metadata':{'name':'hermes-go-jumpserver','namespace':ns},'spec':{'selector':{'app':'hermes-go-jumpserver'},'ports':[{'port':8080,'targetPort':8080}],'type':'ClusterIP'}}
+          _, s = k8s('GET', f'/api/v1/namespaces/{ns}/services/hermes-go-jumpserver')
+          if s == 404:
+              _, s = k8s('POST', f'/api/v1/namespaces/{ns}/services', svc)
+              print(f'  Service: created ({s})')
+
+          ing = {'apiVersion':'networking.k8s.io/v1','kind':'Ingress','metadata':{'name':'hermes-go-jumpserver','namespace':ns,'annotations':{'traefik.ingress.kubernetes.io/router.tls':'true'}},'spec':{'tls':[{'hosts':['hermes-go-jumpserver.steedgrace.com'],'secretName':'steedgrace-com-tls-secret'}],'rules':[{'host':'hermes-go-jumpserver.steedgrace.com','http':{'paths':[{'path':'/','pathType':'Prefix','backend':{'service':{'name':'hermes-go-jumpserver','port':{'number':8080}}}}]}}]}}
+          _, s = k8s('GET', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses/hermes-go-jumpserver')
+          if s == 404:
+              _, s = k8s('POST', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses', ing)
+              print(f'  Ingress: created ({s})')
+
+          ing_h = {'apiVersion':'networking.k8s.io/v1','kind':'Ingress','metadata':{'name':'hermes-go-jumpserver-http','namespace':ns,'annotations':{'traefik.ingress.kubernetes.io/router.middlewares':ns+'-redirect-https@kubernetescrd'}},'spec':{'rules':[{'host':'hermes-go-jumpserver.steedgrace.com','http':{'paths':[{'path':'/','pathType':'Prefix','backend':{'service':{'name':'hermes-go-jumpserver','port':{'number':8080}}}}]}}]}}
+          _, s = k8s('GET', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses/hermes-go-jumpserver-http')
+          if s == 404:
+              _, s = k8s('POST', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses', ing_h)
+              print(f'  HTTP Ingress: created ({s})')
+
+          for i in range(24):
+              time.sleep(5)
+              pods, _ = k8s('GET', f'/api/v1/namespaces/{ns}/pods?labelSelector=app=hermes-go-jumpserver')
+              for pod in pods.get('items',[]):
+                  for c in pod['status'].get('containerStatuses',[]):
+                      st = c.get('state',{})
+                      reason = next(iter(st.values()),{}).get('reason','?')
+                      print(f'  [{i+1}] {pod["metadata"]["name"][:40]}: ready={c.get("ready")} {reason}')
+                      if c.get('ready'):
+                          print('DEPLOY OK')
+                          exit(0)
+          print('Timeout - check cluster')
           "
-      - run: |
-          KNS="${{ vars.K8S_NAMESPACE || 'default' }}"
-          cd k8s
-          sed -i "s|\${DOCKER_IMAGE}|${{ env.IMAGE_NAME }}|g" deployment.yaml
-          sed -i "s|\${DOCKER_TAG}|${{ github.sha }}|g" deployment.yaml
-          sed -i "s|\${K8S_NAMESPACE}|${KNS}|g" deployment.yaml service.yaml ingress.yaml ingress-http.yaml
-          kubectl apply -f deployment.yaml --insecure-skip-tls-verify --validate=false
-          kubectl apply -f service.yaml --insecure-skip-tls-verify --validate=false
-          kubectl rollout status deployment/hermes-go-jumpserver -n ${KNS} --timeout=120s --insecure-skip-tls-verify
-          kubectl get pods -l app=hermes-go-jumpserver -n ${KNS} --insecure-skip-tls-verify
-          kubectl apply -f ingress.yaml --insecure-skip-tls-verify --validate=false
-          kubectl apply -f ingress-http.yaml --insecure-skip-tls-verify --validate=false
