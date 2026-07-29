@@ -70,88 +70,58 @@ jobs:
         run: echo "IMAGE_NAME=$(echo '${{ env.REGISTRY }}/${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Deploy via K8s API
         env:
-          KUBECONFIG_B64: ${{ secrets.KUBECONFIG }}
+          CERT_B64: ${{ secrets.K8S_CLIENT_CERT }}
+          KEY_B64: ${{ secrets.K8S_CLIENT_KEY }}
           IMAGE: ${{ env.IMAGE_NAME }}
           TAG: ${{ github.sha }}
           K8S_NS: ${{ vars.K8S_NAMESPACE || 'default' }}
         run: |
           python3 -c "
-          import base64, json, ssl, http.client, re, time, os
+          import base64, json, ssl, http.client, os, time
 
-          yaml = base64.b64decode(os.environ['KUBECONFIG_B64']).decode()
-          
-          def ext(key):
-              m = re.search(key + r':\s*(.+?)(?:\n\s*\w|\n\w|\$)', yaml, re.DOTALL)
-              return re.sub(r'\s+', '', m.group(1)) if m else None
-
-          cert_b, key_b = base64.b64decode(ext('client-certificate-data')), base64.b64decode(ext('client-key-data'))
-          with open('/tmp/k8s-cert.pem','wb') as f: f.write(cert_b)
-          with open('/tmp/k8s-key.pem','wb') as f: f.write(key_b)
+          cert = base64.b64decode(os.environ['CERT_B64'])
+          key = base64.b64decode(os.environ['KEY_B64'])
+          with open('/tmp/cert.pem','wb') as f: f.write(cert)
+          with open('/tmp/key.pem','wb') as f: f.write(key)
 
           ctx = ssl._create_unverified_context()
-          ctx.load_cert_chain('/tmp/k8s-cert.pem', '/tmp/k8s-key.pem')
+          ctx.load_cert_chain('/tmp/cert.pem', '/tmp/key.pem')
           ctx.check_hostname = False
 
-          def k8s(method, path, body=None):
-              conn = http.client.HTTPSConnection('45.207.168.244', 16443, context=ctx)
-              h = {'User-Agent':'hermes-ci','Content-Type':'application/json'}
-              b = json.dumps(body).encode() if body else None
-              conn.request(method, path, body=b, headers=h)
-              r = conn.getresponse()
-              d = r.read().decode()
-              conn.close()
-              return json.loads(d) if d else None, r.status
+          def k8s(m, p, b=None):
+              c = http.client.HTTPSConnection('45.207.168.244', 16443, context=ctx)
+              h = {'User-Agent':'ci','Content-Type':'application/json'}
+              d = json.dumps(b).encode() if b else None
+              c.request(m, p, body=d, headers=h)
+              r = c.getresponse()
+              x = r.read().decode()
+              c.close()
+              return json.loads(x) if x else None, r.status
 
           ns = os.environ['K8S_NS']
           img = os.environ['IMAGE'] + ':' + os.environ['TAG']
-          print(f'Deploying {img} to {ns}')
+          print(f'Deploy: {img}')
 
-          dep = {
-              'apiVersion':'apps/v1','kind':'Deployment',
-              'metadata':{'name':'hermes-go-jumpserver','namespace':ns},
-              'spec':{
-                  'replicas':1,'selector':{'matchLabels':{'app':'hermes-go-jumpserver'}},
-                  'template':{
-                      'metadata':{'labels':{'app':'hermes-go-jumpserver'}},
-                      'spec':{
-                          'containers':[{
-                              'name':'jumpserver','image':img,
-                              'ports':[{'containerPort':8080}],
-                              'volumeMounts':[{'name':'data','mountPath':'/data'}],
-                              'resources':{'requests':{'cpu':'100m','memory':'64Mi'},'limits':{'cpu':'500m','memory':'256Mi'}},
-                              'livenessProbe':{'httpGet':{'path':'/login','port':8080},'initialDelaySeconds':10,'periodSeconds':30},
-                              'readinessProbe':{'httpGet':{'path':'/login','port':8080},'initialDelaySeconds':5,'periodSeconds':10}
-                          }],
-                          'volumes':[{'name':'data','emptyDir':{}}]
-                      }
-                  }
-              }
-          }
+          dep = {'apiVersion':'apps/v1','kind':'Deployment','metadata':{'name':'hermes-go-jumpserver','namespace':ns},'spec':{'replicas':1,'selector':{'matchLabels':{'app':'hermes-go-jumpserver'}},'template':{'metadata':{'labels':{'app':'hermes-go-jumpserver'}},'spec':{'containers':[{'name':'jumpserver','image':img,'ports':[{'containerPort':8080}],'volumeMounts':[{'name':'data','mountPath':'/data'}],'resources':{'requests':{'cpu':'100m','memory':'64Mi'},'limits':{'cpu':'500m','memory':'256Mi'}}}],'volumes':[{'name':'data','emptyDir':{}}]}}}}
           _, s = k8s('GET', f'/apis/apps/v1/namespaces/{ns}/deployments/hermes-go-jumpserver')
           if s == 404:
               _, s = k8s('POST', f'/apis/apps/v1/namespaces/{ns}/deployments', dep)
-              print(f'  Deployment: created ({s})')
+              print(f'  Deploy: created {s}')
           else:
               _, s = k8s('PUT', f'/apis/apps/v1/namespaces/{ns}/deployments/hermes-go-jumpserver', dep)
-              print(f'  Deployment: updated ({s})')
+              print(f'  Deploy: updated {s}')
 
           svc = {'apiVersion':'v1','kind':'Service','metadata':{'name':'hermes-go-jumpserver','namespace':ns},'spec':{'selector':{'app':'hermes-go-jumpserver'},'ports':[{'port':8080,'targetPort':8080}],'type':'ClusterIP'}}
           _, s = k8s('GET', f'/api/v1/namespaces/{ns}/services/hermes-go-jumpserver')
-          if s == 404:
-              _, s = k8s('POST', f'/api/v1/namespaces/{ns}/services', svc)
-              print(f'  Service: created ({s})')
+          if s == 404: _, s = k8s('POST', f'/api/v1/namespaces/{ns}/services', svc)
 
           ing = {'apiVersion':'networking.k8s.io/v1','kind':'Ingress','metadata':{'name':'hermes-go-jumpserver','namespace':ns,'annotations':{'traefik.ingress.kubernetes.io/router.tls':'true'}},'spec':{'tls':[{'hosts':['hermes-go-jumpserver.steedgrace.com'],'secretName':'steedgrace-com-tls-secret'}],'rules':[{'host':'hermes-go-jumpserver.steedgrace.com','http':{'paths':[{'path':'/','pathType':'Prefix','backend':{'service':{'name':'hermes-go-jumpserver','port':{'number':8080}}}}]}}]}}
           _, s = k8s('GET', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses/hermes-go-jumpserver')
-          if s == 404:
-              _, s = k8s('POST', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses', ing)
-              print(f'  Ingress: created ({s})')
+          if s == 404: _, s = k8s('POST', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses', ing)
 
           ing_h = {'apiVersion':'networking.k8s.io/v1','kind':'Ingress','metadata':{'name':'hermes-go-jumpserver-http','namespace':ns,'annotations':{'traefik.ingress.kubernetes.io/router.middlewares':ns+'-redirect-https@kubernetescrd'}},'spec':{'rules':[{'host':'hermes-go-jumpserver.steedgrace.com','http':{'paths':[{'path':'/','pathType':'Prefix','backend':{'service':{'name':'hermes-go-jumpserver','port':{'number':8080}}}}]}}]}}
           _, s = k8s('GET', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses/hermes-go-jumpserver-http')
-          if s == 404:
-              _, s = k8s('POST', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses', ing_h)
-              print(f'  HTTP Ingress: created ({s})')
+          if s == 404: _, s = k8s('POST', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses', ing_h)
 
           for i in range(24):
               time.sleep(5)
@@ -159,10 +129,11 @@ jobs:
               for pod in pods.get('items',[]):
                   for c in pod['status'].get('containerStatuses',[]):
                       st = c.get('state',{})
-                      reason = next(iter(st.values()),{}).get('reason','?')
-                      print(f'  [{i+1}] {pod["metadata"]["name"][:40]}: ready={c.get("ready")} {reason}')
+                      r = next(iter(st.values()),{}).get('reason','?')
+                      print(f'  [{i+1}] {pod["metadata"]["name"][:40]}: ready={c.get("ready")} {r}')
                       if c.get('ready'):
                           print('DEPLOY OK')
                           exit(0)
-          print('Timeout - check cluster')
+          print('Timeout')
+          exit(1)
           "
