@@ -74,14 +74,18 @@ jobs:
           KUBECONFIG_B64: ${{ secrets.KUBECONFIG }}
         run: |
           python3 -c "
-          import base64, re, os
+          import base64, os
           yaml = base64.b64decode(os.environ['KUBECONFIG_B64']).decode()
-          # Remove certificate-authority-data (not needed with insecure-skip-tls-verify)
-          yaml = re.sub(r'certificate-authority-data:\s*[A-Za-z0-9+/=\s]+', 'certificate-authority-data: ""', yaml)
+          # Remove certificate-authority-data line (not needed with insecure-skip)
+          lines = yaml.split('\n')
+          filtered = [l for l in lines if 'certificate-authority-data' not in l]
+          yaml = '\n'.join(filtered)
           os.makedirs(os.path.expanduser('~/.kube'), exist_ok=True)
           with open(os.path.expanduser('~/.kube/config'), 'w') as f:
               f.write(yaml)
           print(f'kubeconfig: {len(yaml)} bytes (CA removed)')
+          print('First 4 lines:')
+          for l in yaml.split('\n')[:4]: print(f'  {l[:80]}')
           "
       - run: |
           KNS="${{ vars.K8S_NAMESPACE || 'default' }}"
