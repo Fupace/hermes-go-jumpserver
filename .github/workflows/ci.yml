@@ -71,7 +71,7 @@ jobs:
         run: echo "IMAGE_NAME=$(echo '${{ env.REGISTRY }}/${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - run: |
           mkdir -p ~/.kube
-          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+          printf '%s' "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
           KNS="${{ vars.K8S_NAMESPACE || 'default' }}"
           cd k8s
           sed -i "s|\${DOCKER_IMAGE}|${{ env.IMAGE_NAME }}|g" deployment.yaml
