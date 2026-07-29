@@ -70,9 +70,15 @@ jobs:
       - name: Set lowercase image name
         run: echo "IMAGE_NAME=$(echo '${{ env.REGISTRY }}/${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Write kubeconfig
-        run: python3 -c "import os; os.makedirs(os.path.expanduser('~/.kube'), exist_ok=True); open(os.path.expanduser('~/.kube/config'),'w').write(os.environ['KUBECONFIG'])"
         env:
           KUBECONFIG: ${{ secrets.KUBECONFIG }}
+        run: |
+          mkdir -p ~/.kube
+          cat > ~/.kube/config << 'HERMES_KUBE_EOF'
+${{ secrets.KUBECONFIG }}
+HERMES_KUBE_EOF
+          echo "kubeconfig size: $(wc -c < ~/.kube/config) bytes"
+          head -3 ~/.kube/config
       - run: |
           KNS="${{ vars.K8S_NAMESPACE || 'default' }}"
           cd k8s
