@@ -75,4 +75,4 @@ jobs:
           IMAGE: ${{ env.IMAGE_NAME }}
           TAG: ${{ github.sha }}
           K8S_NS: ${{ vars.K8S_NAMESPACE || 'default' }}
-        run: python3 deploy.py
+        run: python3 k8s/deploy.py
