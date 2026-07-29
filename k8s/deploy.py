@@ -1,0 +1,106 @@
+import base64, json, ssl, http.client, os, time
+
+cert = base64.b64decode(os.environ['CERT_B64'])
+key = base64.b64decode(os.environ['KEY_B64'])
+with open('/tmp/cert.pem','wb') as f: f.write(cert)
+with open('/tmp/key.pem','wb') as f: f.write(key)
+
+ctx = ssl._create_unverified_context()
+ctx.load_cert_chain('/tmp/cert.pem', '/tmp/key.pem')
+ctx.check_hostname = False
+
+def k8s(m, p, b=None):
+    c = http.client.HTTPSConnection('45.207.168.244', 16443, context=ctx)
+    h = {'User-Agent':'ci','Content-Type':'application/json'}
+    d = json.dumps(b).encode() if b else None
+    c.request(m, p, body=d, headers=h)
+    r = c.getresponse()
+    x = r.read().decode()
+    c.close()
+    return json.loads(x) if x else None, r.status
+
+ns = os.environ['K8S_NS']
+img = os.environ['IMAGE'] + ':' + os.environ['TAG']
+print(f'Deploy: {img}')
+
+dep = {
+    'apiVersion':'apps/v1','kind':'Deployment',
+    'metadata':{'name':'hermes-go-jumpserver','namespace':ns},
+    'spec':{
+        'replicas':1,
+        'selector':{'matchLabels':{'app':'hermes-go-jumpserver'}},
+        'template':{
+            'metadata':{'labels':{'app':'hermes-go-jumpserver'}},
+            'spec':{
+                'containers':[{
+                    'name':'jumpserver','image':img,
+                    'ports':[{'containerPort':8080}],
+                    'volumeMounts':[{'name':'data','mountPath':'/data'}],
+                    'resources':{'requests':{'cpu':'100m','memory':'64Mi'},'limits':{'cpu':'500m','memory':'256Mi'}}
+                }],
+                'volumes':[{'name':'data','emptyDir':{}}]
+            }
+        }
+    }
+}
+
+_, s = k8s('GET', f'/apis/apps/v1/namespaces/{ns}/deployments/hermes-go-jumpserver')
+if s == 404:
+    _, s = k8s('POST', f'/apis/apps/v1/namespaces/{ns}/deployments', dep)
+    print(f'  Deployment: created ({s})')
+else:
+    _, s = k8s('PUT', f'/apis/apps/v1/namespaces/{ns}/deployments/hermes-go-jumpserver', dep)
+    print(f'  Deployment: updated ({s})')
+
+svc = {
+    'apiVersion':'v1','kind':'Service',
+    'metadata':{'name':'hermes-go-jumpserver','namespace':ns},
+    'spec':{'selector':{'app':'hermes-go-jumpserver'},'ports':[{'port':8080,'targetPort':8080}],'type':'ClusterIP'}
+}
+_, s = k8s('GET', f'/api/v1/namespaces/{ns}/services/hermes-go-jumpserver')
+if s == 404:
+    _, s = k8s('POST', f'/api/v1/namespaces/{ns}/services', svc)
+    print(f'  Service: created ({s})')
+
+ing = {
+    'apiVersion':'networking.k8s.io/v1','kind':'Ingress',
+    'metadata':{'name':'hermes-go-jumpserver','namespace':ns,'annotations':{'traefik.ingress.kubernetes.io/router.tls':'true'}},
+    'spec':{
+        'tls':[{'hosts':['hermes-go-jumpserver.steedgrace.com'],'secretName':'steedgrace-com-tls-secret'}],
+        'rules':[{'host':'hermes-go-jumpserver.steedgrace.com','http':{'paths':[{'path':'/','pathType':'Prefix','backend':{'service':{'name':'hermes-go-jumpserver','port':{'number':8080}}}}]}}]
+    }
+}
+_, s = k8s('GET', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses/hermes-go-jumpserver')
+if s == 404:
+    _, s = k8s('POST', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses', ing)
+    print(f'  Ingress: created ({s})')
+
+ing_h = {
+    'apiVersion':'networking.k8s.io/v1','kind':'Ingress',
+    'metadata':{'name':'hermes-go-jumpserver-http','namespace':ns,'annotations':{'traefik.ingress.kubernetes.io/router.middlewares':ns+'-redirect-https@kubernetescrd'}},
+    'spec':{'rules':[{'host':'hermes-go-jumpserver.steedgrace.com','http':{'paths':[{'path':'/','pathType':'Prefix','backend':{'service':{'name':'hermes-go-jumpserver','port':{'number':8080}}}}]}}]}
+}
+_, s = k8s('GET', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses/hermes-go-jumpserver-http')
+if s == 404:
+    _, s = k8s('POST', f'/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses', ing_h)
+    print(f'  HTTP Ingress: created ({s})')
+
+for i in range(24):
+    time.sleep(5)
+    pods, _ = k8s('GET', f'/api/v1/namespaces/{ns}/pods?labelSelector=app=hermes-go-jumpserver')
+    ok = False
+    for pod in pods.get('items', []):
+        name = pod.get('metadata', {}).get('name', 'unknown')
+        for c in pod.get('status', {}).get('containerStatuses', []):
+            st = c.get('state', {})
+            reason = next(iter(st.values()), {}).get('reason', '?')
+            ready = c.get('ready', False)
+            img_tag = c.get('image', '').split(':')[-1][:12]
+            print(f'  [{i+1}] {name[:45]}: ready={ready} {reason} img={img_tag}')
+            if ready:
+                ok = True
+    if ok:
+        print('DEPLOY OK')
+        exit(0)
+print('Timeout - check cluster')
+exit(1)
