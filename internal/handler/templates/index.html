@@ -46,16 +46,18 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .modal-actions .btn-primary:hover { background: #2ea043; }
 .modal-actions .btn-cancel { background: #30363d; color: #c9d1d9; }
 .modal-actions .btn-cancel:hover { background: #484f58; }
+.error-banner { display: none; background: #da3633; color: #fff; padding: 8px 16px; text-align: center; font-size: 13px; }
 </style>
 </head>
 <body>
+<div class="error-banner" id="errorBanner"></div>
 <div class="sidebar">
   <div class="sidebar-header">
     <h2>Machines</h2>
-    <button onclick="showAddModal()">+ Add</button>
+    <button id="addBtn">+ Add</button>
   </div>
   <div class="machine-list" id="machineList"></div>
-  <button class="logout-btn" onclick="logout()">Sign Out</button>
+  <button class="logout-btn" id="logoutBtn">Sign Out</button>
 </div>
 <div class="main">
   <div class="toolbar">
@@ -81,143 +83,212 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <div class="form-group"><label>SSH Private Key (base64)</label><textarea id="mKey" placeholder="base64 encoded private key"></textarea></div>
       <div class="form-group"><label>Labels</label><input type="text" id="mLabels" placeholder="prod,web,us-east"></div>
       <div class="modal-actions">
-        <button type="button" class="btn-cancel" onclick="closeModal()">Cancel</button>
+        <button type="button" class="btn-cancel" id="cancelBtn">Cancel</button>
         <button type="submit" class="btn-primary">Save</button>
       </div>
     </form>
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
 <script>
-let currentMachineId = null;
-let ws = null;
-let term = null;
-let fitAddon = null;
+// Load xterm dynamically - won't block the page if CDN fails
+function loadScript(src) {
+  return new Promise(function(resolve, reject) {
+    var s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
 
-(async () => {
-  const res = await fetch('/api/session');
-  const data = await res.json();
+var currentMachineId = null;
+var ws = null;
+var term = null;
+var fitAddon = null;
+var terminalReady = false;
+
+function htmlescape(s) {
+  s = s || '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function showError(msg) {
+  var banner = document.getElementById('errorBanner');
+  banner.textContent = msg;
+  banner.style.display = 'block';
+  setTimeout(function() { banner.style.display = 'none'; }, 5000);
+}
+
+// Auth check - runs first, independently
+fetch('/api/session').then(function(res) { return res.json(); }).then(function(data) {
   if (!data.authenticated) { window.location.href = '/login'; return; }
   loadMachines();
-  initTerminal();
-})();
+  loadTerminalLazy();
+}).catch(function() {
+  window.location.href = '/login';
+});
 
-function initTerminal() {
-  term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: "'Cascadia Code', 'Fira Code', monospace", theme: { background: '#0d1117', foreground: '#c9d1d9' } });
-  fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(document.getElementById('terminalContainer'));
-  fitAddon.fit();
-  window.addEventListener('resize', () => fitAddon.fit());
+function loadTerminalLazy() {
+  loadScript('https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js').then(function() {
+    return loadScript('https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js');
+  }).then(function() {
+    try {
+      term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: "'Cascadia Code', 'Fira Code', monospace", theme: { background: '#0d1117', foreground: '#c9d1d9' } });
+      fitAddon = new FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(document.getElementById('terminalContainer'));
+      fitAddon.fit();
+      window.addEventListener('resize', function() { if (fitAddon) fitAddon.fit(); });
+      terminalReady = true;
+    } catch(e) {
+      showError('Terminal init failed: ' + e.message);
+    }
+  }).catch(function() {
+    showError('xterm.js CDN unreachable - terminal disabled');
+  });
 }
 
-async function loadMachines() {
-  const res = await fetch('/api/machines');
-  const machines = await res.json();
-  const list = document.getElementById('machineList');
-  list.innerHTML = machines.map(m => '<div class="machine-item ' + (currentMachineId === m.id ? 'active' : '') + '" onclick="connectSSH(' + m.id + ')"><div><div class="name">' + esc(m.name) + '</div><div class="host">' + esc(m.host) + ':' + m.port + ' · ' + esc(m.username) + '</div></div><div class="machine-actions" onclick="event.stopPropagation()"><button title="Edit" onclick="showEditModal(' + m.id + ', '' + esc(m.name) + '', '' + esc(m.host) + '', ' + m.port + ', '' + esc(m.username) + '', '' + esc(m.labels) + '')">Edit</button><button class="delete" title="Delete" onclick="deleteMachine(' + m.id + ')">Del</button></div></div>').join('');
+function loadMachines() {
+  fetch('/api/machines').then(function(res) { return res.json(); }).then(function(machines) {
+    var list = document.getElementById('machineList');
+    list.innerHTML = '';
+    machines.forEach(function(m) {
+      var item = document.createElement('div');
+      item.className = 'machine-item' + (currentMachineId === m.id ? ' active' : '');
+      item.innerHTML = '<div><div class="name">' + htmlescape(m.name) + '</div><div class="host">' + htmlescape(m.host) + ':' + m.port + ' · ' + htmlescape(m.username) + '</div></div><div class="machine-actions"><button class="edit-btn">Edit</button><button class="delete-btn">Del</button></div>';
+      
+      item.addEventListener('click', function() { connectSSH(m.id); });
+      
+      item.querySelector('.edit-btn').addEventListener('click', function(e) {
+        e.stopPropagation();
+        showEditModal(m);
+      });
+      
+      item.querySelector('.delete-btn').addEventListener('click', function(e) {
+        e.stopPropagation();
+        deleteMachine(m.id);
+      });
+      
+      list.appendChild(item);
+    });
+  }).catch(function(err) {
+    showError('Failed to load machines: ' + err.message);
+  });
 }
 
-function esc(s) { return (s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
-
-async function connectSSH(id) {
+function connectSSH(id) {
+  if (!terminalReady) { showError('Terminal not ready - xterm.js may be loading'); return; }
   if (ws) { ws.close(); ws = null; }
   currentMachineId = id;
   loadMachines();
   document.getElementById('placeholder').style.display = 'none';
   document.getElementById('connStatus').textContent = 'Connecting...';
   document.getElementById('connStatus').className = 'status';
-  const res = await fetch('/api/machines/' + id);
-  const m = await res.json();
-  document.getElementById('machineInfo').textContent = m.name + ' (' + m.host + ':' + m.port + ')';
-  term.reset();
-  const cols = term.cols, rows = term.rows;
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(proto + '//' + location.host + '/api/ssh/' + id + '?cols=' + cols + '&rows=' + rows);
-  ws.onopen = () => {
-    document.getElementById('connStatus').textContent = 'Connected';
-    document.getElementById('connStatus').className = 'status connected';
-  };
-  ws.onmessage = (e) => { term.write(e.data); };
-  ws.onclose = () => {
-    document.getElementById('connStatus').textContent = 'Disconnected';
-    document.getElementById('connStatus').className = 'status';
-    currentMachineId = null;
-    loadMachines();
-  };
-  ws.onerror = () => {
-    document.getElementById('connStatus').textContent = 'Connection error';
-    document.getElementById('connStatus').className = 'status';
-  };
-  term.onData((data) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'stdin', data: data }));
-    }
-  });
-  term.onResize(({cols, rows}) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'resize', data: JSON.stringify({ cols, rows }) }));
-    }
+
+  fetch('/api/machines/' + id).then(function(res) { return res.json(); }).then(function(m) {
+    document.getElementById('machineInfo').textContent = m.name + ' (' + m.host + ':' + m.port + ')';
+    term.reset();
+    var cols = term.cols, rows = term.rows;
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/api/ssh/' + id + '?cols=' + cols + '&rows=' + rows);
+    ws.onopen = function() {
+      document.getElementById('connStatus').textContent = 'Connected';
+      document.getElementById('connStatus').className = 'status connected';
+    };
+    ws.onmessage = function(e) { term.write(e.data); };
+    ws.onclose = function() {
+      document.getElementById('connStatus').textContent = 'Disconnected';
+      document.getElementById('connStatus').className = 'status';
+      currentMachineId = null;
+      loadMachines();
+    };
+    ws.onerror = function() {
+      document.getElementById('connStatus').textContent = 'Connection error';
+      document.getElementById('connStatus').className = 'status';
+    };
+    term.onData(function(data) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'stdin', data: data }));
+      }
+    });
+    term.onResize(function(size) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'resize', data: JSON.stringify({ cols: size.cols, rows: size.rows }) }));
+      }
+    });
+  }).catch(function(err) {
+    showError('SSH error: ' + err.message);
   });
 }
 
-function showAddModal() {
+function showEditModal(m) {
+  document.getElementById('modalTitle').textContent = 'Edit Machine';
+  document.getElementById('machineId').value = m.id;
+  document.getElementById('mName').value = m.name;
+  document.getElementById('mHost').value = m.host;
+  document.getElementById('mPort').value = m.port;
+  document.getElementById('mUser').value = m.username;
+  document.getElementById('mPass').value = '';
+  document.getElementById('mKey').value = '';
+  document.getElementById('mLabels').value = m.labels || '';
+  document.getElementById('machineModal').classList.add('show');
+}
+
+// Bind UI events
+document.getElementById('addBtn').addEventListener('click', function() {
   document.getElementById('modalTitle').textContent = 'Add Machine';
   document.getElementById('machineId').value = '';
   document.getElementById('machineForm').reset();
   document.getElementById('mPort').value = '22';
   document.getElementById('mUser').value = 'root';
   document.getElementById('machineModal').classList.add('show');
-}
+});
 
-async function showEditModal(id, name, host, port, username, labels) {
-  document.getElementById('modalTitle').textContent = 'Edit Machine';
-  document.getElementById('machineId').value = id;
-  document.getElementById('mName').value = name;
-  document.getElementById('mHost').value = host;
-  document.getElementById('mPort').value = port;
-  document.getElementById('mUser').value = username;
-  document.getElementById('mPass').value = '';
-  document.getElementById('mKey').value = '';
-  document.getElementById('mLabels').value = labels;
-  document.getElementById('machineModal').classList.add('show');
-}
+document.getElementById('cancelBtn').addEventListener('click', function() {
+  document.getElementById('machineModal').classList.remove('show');
+});
 
-function closeModal() { document.getElementById('machineModal').classList.remove('show'); }
+document.getElementById('logoutBtn').addEventListener('click', function() {
+  fetch('/api/logout', { method: 'POST' }).then(function() {
+    window.location.href = '/login';
+  });
+});
 
-document.getElementById('machineForm').addEventListener('submit', async (e) => {
+document.getElementById('machineForm').addEventListener('submit', function(e) {
   e.preventDefault();
-  const id = document.getElementById('machineId').value;
-  const body = {
+  var id = document.getElementById('machineId').value;
+  var body = {
     name: document.getElementById('mName').value,
     host: document.getElementById('mHost').value,
     port: parseInt(document.getElementById('mPort').value) || 22,
     username: document.getElementById('mUser').value,
     password: document.getElementById('mPass').value,
     key_file: document.getElementById('mKey').value,
-    labels: document.getElementById('mLabels').value,
+    labels: document.getElementById('mLabels').value
   };
-  const method = id ? 'PUT' : 'POST';
-  const url = id ? '/api/machines/' + id : '/api/machines';
-  const res = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-  if (res.ok) { closeModal(); loadMachines(); }
-  else { alert('Failed to save machine: ' + await res.text()); }
+  var method = id ? 'PUT' : 'POST';
+  var url = id ? '/api/machines/' + id : '/api/machines';
+  fetch(url, { method: method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) })
+    .then(function(res) {
+      if (res.ok) {
+        document.getElementById('machineModal').classList.remove('show');
+        loadMachines();
+      } else {
+        return res.text().then(function(txt) { alert('Failed to save machine: ' + txt); });
+      }
+    })
+    .catch(function(err) { alert('Error: ' + err.message); });
 });
 
-async function deleteMachine(id) {
+function deleteMachine(id) {
   if (!confirm('Delete this machine?')) return;
-  const res = await fetch('/api/machines/' + id, { method: 'DELETE' });
-  if (res.ok) {
-    if (currentMachineId === id) { ws && ws.close(); }
-    loadMachines();
-  }
-}
-
-async function logout() {
-  await fetch('/api/logout', { method: 'POST' });
-  window.location.href = '/login';
+  fetch('/api/machines/' + id, { method: 'DELETE' }).then(function(res) {
+    if (res.ok) {
+      if (currentMachineId === id && ws) { ws.close(); }
+      loadMachines();
+    }
+  });
 }
 </script>
 </body>
