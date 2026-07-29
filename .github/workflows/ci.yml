@@ -69,16 +69,18 @@ jobs:
       - uses: azure/setup-kubectl@v4
       - name: Set lowercase image name
         run: echo "IMAGE_NAME=$(echo '${{ env.REGISTRY }}/${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-      - name: Write kubeconfig
+      - name: Decode kubeconfig
         env:
-          KUBECONFIG: ${{ secrets.KUBECONFIG }}
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG }}
         run: |
-          mkdir -p ~/.kube
-          cat > ~/.kube/config << 'HERMES_KUBE_EOF'
-${{ secrets.KUBECONFIG }}
-HERMES_KUBE_EOF
-          echo "kubeconfig size: $(wc -c < ~/.kube/config) bytes"
-          head -3 ~/.kube/config
+          python3 -c "
+          import base64, os
+          yaml = base64.b64decode(os.environ['KUBECONFIG_B64']).decode()
+          os.makedirs(os.path.expanduser('~/.kube'), exist_ok=True)
+          with open(os.path.expanduser('~/.kube/config'), 'w') as f:
+              f.write(yaml)
+          print(f'kubeconfig: {len(yaml)} bytes')
+          "
       - run: |
           KNS="${{ vars.K8S_NAMESPACE || 'default' }}"
           cd k8s
